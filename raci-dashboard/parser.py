@@ -24,8 +24,6 @@ import csv
 import io
 import os
 import re
-from collections import Counter
-
 RACI_VALUES = {'R', 'A', 'C', 'I'}
 
 # Extended RACI variants mapped to standard R/A/C/I

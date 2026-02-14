@@ -210,6 +210,50 @@ html, body {
 
 .upload-btn:hover { border-color: var(--raci-r); color: var(--raci-r); }
 
+/* ─── Export Dropdown ─── */
+.export-dropdown {
+    position: relative;
+    display: inline-block;
+}
+
+.export-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    z-index: 50;
+    min-width: 160px;
+    padding: 4px 0;
+}
+
+.export-menu-item {
+    display: block;
+    width: 100%;
+    font-family: var(--font-sans);
+    font-size: 12px;
+    padding: 7px 14px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    text-align: left;
+    transition: all var(--transition);
+}
+
+.export-menu-item:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+}
+
+.export-menu-item:disabled {
+    color: var(--text-dim);
+    cursor: not-allowed;
+}
+
 /* ─── Error Bar ─── */
 .error-bar {
     padding: 10px 24px;

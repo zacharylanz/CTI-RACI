@@ -1,11 +1,14 @@
 """
-Flask server — serves the dashboard and handles file uploads.
+Flask server — serves the dashboard and handles file uploads and exports.
 """
 
+import io
 import json
 import os
+import tempfile
+import zipfile
 
-from flask import Flask, Response, request, send_from_directory
+from flask import Flask, Response, request, send_from_directory, send_file
 
 from parser import parse_file_from_bytes
 
@@ -74,6 +77,55 @@ def create_app(initial_data=None):
                 json.dumps({'error': f'Failed to parse file: {e}'}),
                 status=500,
                 mimetype='application/json'
+            )
+
+    @app.route('/api/export/html', methods=['POST'])
+    def export_html_endpoint():
+        """Export self-contained HTML dashboard. Accepts data as POST JSON body."""
+        from export import export_html
+        data = request.get_json() or app.raci_data
+        if not data:
+            return Response(json.dumps({'error': 'No data'}), status=400, mimetype='application/json')
+
+        with tempfile.NamedTemporaryFile(suffix='.html', delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            export_html(data, tmp_path)
+            with open(tmp_path, 'rb') as f:
+                buf = io.BytesIO(f.read())
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return send_file(
+            buf,
+            mimetype='text/html',
+            as_attachment=True,
+            download_name='raci-dashboard.html'
+        )
+
+    @app.route('/api/export/powerbi', methods=['POST'])
+    def export_powerbi_endpoint():
+        """Export Power BI starter kit as a ZIP file. Accepts data as POST JSON body."""
+        from export import export_powerbi
+        data = request.get_json() or app.raci_data
+        if not data:
+            return Response(json.dumps({'error': 'No data'}), status=400, mimetype='application/json')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            files = export_powerbi(data, tmpdir)
+            # Create ZIP in memory
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for fp in files:
+                    zf.write(fp, os.path.basename(fp))
+            buf.seek(0)
+            return send_file(
+                buf,
+                mimetype='application/zip',
+                as_attachment=True,
+                download_name='raci-powerbi-kit.zip'
             )
 
     return app

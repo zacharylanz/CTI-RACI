@@ -59,29 +59,113 @@ function TooltipProvider({ children }) {
     );
 }
 
-// ─── Browser-side Excel Parser (mirrors Python parser.py) ───
+// ─── Browser-side Excel Parser (mirrors Python parser.py v2) ───
 function parseXLSXInBrowser(workbook, sheetName) {
-    const ws = sheetName ? workbook.Sheets[sheetName] : workbook.Sheets[workbook.SheetNames[0]];
-    const usedSheet = sheetName || workbook.SheetNames[0];
-    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-    if (!rows.length) throw new Error('Sheet is empty');
-
-    const RACI_VALUES = new Set(['R', 'A', 'C', 'I']);
-    const ROLE_PALETTE = ['#4ae0b0', '#e0a040', '#6090e0', '#a0b8d0', '#e06080', '#80d0d0', '#d080e0', '#c0c060'];
-    const CAT_PALETTE = ['#8090CC', '#50C890', '#90C850', '#B888CC', '#C8A050', '#A080C0', '#C89850', '#6898B8', '#58A8C0'];
-    const TARGET_KW = ['target', 'tgt', 'future', 'goal', 'projected', 'to-be', 'to be', 'with'];
-    const UNFILLED_KW = ['open', 'unfilled', 'vacant', '\u2605', 'tbd', 'tbc', 'hire'];
+    const RACI_SET = new Set(['R', 'A', 'C', 'I']);
+    const RACI_EXTENDED = { R:'R', A:'A', C:'C', I:'I', S:'C', V:'C', D:'R', P:'R', X:'R', O:'R', L:'R' };
+    const RACI_FULLWORDS = {
+        responsible:'R', accountable:'A', consulted:'C', informed:'I',
+        supportive:'C', support:'C', driver:'R', approver:'A', contributor:'C',
+        perform:'R', recommend:'C', input:'C', decide:'A', lead:'R', owner:'R',
+        participant:'C', verify:'C', 'sign-off':'A', 'sign off':'A', yes:'R', y:'R',
+    };
+    const RACI_PRIORITY = { R:4, A:3, C:2, I:1 };
+    const ROLE_PALETTE = ['#4ae0b0','#e0a040','#6090e0','#a0b8d0','#e06080','#80d0d0','#d080e0','#c0c060',
+                          '#50b890','#d09060','#7080d0','#b0c8e0','#d070a0','#60c0b0','#c090d0','#b0b070'];
+    const CAT_PALETTE = ['#8090CC','#50C890','#90C850','#B888CC','#C8A050','#A080C0','#C89850','#6898B8','#58A8C0',
+                         '#7888B8','#60B880','#A0B850','#C898C0','#B8A060','#9078B0','#D0A858'];
+    const TARGET_KW = ['target','tgt','future','goal','projected','to-be','to be','desired','planned','expected','with'];
+    const UNFILLED_KW = ['open','unfilled','vacant','\u2605','tbd','tbc','hire','needed','new'];
+    const SUMMARY_KW = ['average','avg','total','sum','count','mean','median','grand total','subtotal','sub-total','summary','category average','section total'];
+    const SUMMARY_CAT_KW = ['average','avg','total','sum','count','legend','key','summary','appendix','reference',
+        'notes','glossary','responsible (r)','accountable (a)','consulted (c)','informed (i)',
+        'raci legend','raci key','raci count','count by role'];
+    const NAME_KW = ['capability','name','activity','task','function','process','item','deliverable','work package',
+        'work item','responsibility','action','objective','requirement','service','control'];
+    const DESC_KW = ['desc','description','details','notes','comment','explanation','definition','summary','scope'];
+    const CAT_KW = ['category','domain','area','group','pillar','section','phase','stream','workstream',
+        'department','team','module','tower','theme','bucket','cluster'];
+    const DELTA_KW = ['delta','uplift','gap','\u0394','diff','difference','variance','change','improvement'];
+    const STATUS_KW = ['status','state','fill','progress','completion'];
+    const PRIORITY_KW = ['priority','prio','importance','urgency','rank','weight'];
+    const ID_EXACT = new Set(['#','id','no','no.','ref','ref.','key']);
 
     const str = v => (v == null ? '' : String(v).trim());
     const strUp = v => str(v).toUpperCase();
-    const isRaci = v => RACI_VALUES.has(strUp(v));
-    const isMat = v => { const s = str(v); if (!s) return false; const n = Number(s); return !isNaN(n) && n >= 0 && n <= 5; };
 
+    // Normalize any RACI value (single letter, full word, multi-value, extended variants)
+    const normalizeRaci = (v) => {
+        const s = str(v); if (!s) return '';
+        const upper = s.toUpperCase();
+        if (RACI_SET.has(upper)) return upper;
+        if (RACI_EXTENDED[upper]) return RACI_EXTENDED[upper];
+        const lower = s.toLowerCase();
+        if (RACI_FULLWORDS[lower]) return RACI_FULLWORDS[lower];
+        const parts = upper.split(/[/,&\s]+/).map(p => p.trim()).filter(p => RACI_EXTENDED[p]);
+        if (parts.length) return parts.map(p => RACI_EXTENDED[p]).sort((a,b) => (RACI_PRIORITY[b]||0) - (RACI_PRIORITY[a]||0))[0];
+        for (const [word, letter] of Object.entries(RACI_FULLWORDS)) { if (lower.startsWith(word)) return letter; }
+        return '';
+    };
+    const isRaci = v => normalizeRaci(v) !== '';
+    const isMat = (v, max=5) => { const s = str(v).replace(/%$/,'').trim(); if (!s) return false; const n = Number(s); return !isNaN(n) && n >= 0 && n <= max; };
+    const isSummaryRow = v => { const l = v.toLowerCase().trim(); return SUMMARY_KW.some(k => l.includes(k)); };
+    const isSummaryCat = v => { const l = v.toLowerCase().trim(); return SUMMARY_CAT_KW.some(k => l.includes(k)); };
+    const stripCatNum = v => v.replace(/^[\d]+[.):\-]\s*/, '').replace(/^[a-zA-Z][.)]\s*/, '').replace(/^[\u2022\u25CF\u25CB\u25E6\u25AA\u25B8\u25BA\u2192\u2013\u2014]\s*/, '').trim() || v.trim();
+
+    // Auto-pick best sheet by RACI density + name hints
+    let ws, usedSheet;
+    if (sheetName && workbook.Sheets[sheetName]) {
+        ws = workbook.Sheets[sheetName]; usedSheet = sheetName;
+    } else if (workbook.SheetNames.length === 1) {
+        usedSheet = workbook.SheetNames[0]; ws = workbook.Sheets[usedSheet];
+    } else {
+        let bestScore = -1, bestName = workbook.SheetNames[0];
+        for (const name of workbook.SheetNames) {
+            let score = 0; const nl = name.toLowerCase();
+            if (nl.includes('raci')) score += 50;
+            if (nl.includes('maturity')) score += 20;
+            if (['responsibility','assignment','matrix'].some(k => nl.includes(k))) score += 30;
+            if (['chart','graph','pivot','lookup','config','template','instruction','readme','cover'].some(k => nl.includes(k))) score -= 50;
+            const sRows = XLSX.utils.sheet_to_json(workbook.Sheets[name], { header: 1, defval: null });
+            let rc = 0, cc = 0;
+            for (let ri = 0; ri < Math.min(sRows.length, 30); ri++) {
+                for (const val of (sRows[ri] || [])) { const s = strUp(val); if (s) { cc++; if (RACI_SET.has(s)) rc++; } }
+            }
+            if (cc > 0) score += Math.round((rc / cc) * 100);
+            if (score > bestScore) { bestScore = score; bestName = name; }
+        }
+        usedSheet = bestName; ws = workbook.Sheets[usedSheet];
+    }
+
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+    if (!rows.length) throw new Error('Sheet is empty');
+
+    // Detect maturity scale
+    const detectScale = (values) => {
+        const nums = values.map(v => Number(str(v).replace(/%$/,'').trim())).filter(n => !isNaN(n));
+        if (!nums.length) return 5;
+        const max = Math.max(...nums);
+        if (max > 10) return 100;
+        if (max > 5) return 10;
+        return 5;
+    };
+    const normalizeMat = (v, scale) => {
+        const s = str(v).replace(/%$/,'').trim(); const n = Number(s);
+        if (isNaN(n)) return null;
+        if (scale === 100) return Math.round(n / 20);
+        if (scale === 10) return Math.round(n / 2);
+        return Math.round(n);
+    };
+
+    // Find header row (skip merged titles, numeric rows)
     let headerIdx = 0;
-    for (let i = 0; i < Math.min(rows.length, 20); i++) {
-        const nonEmpty = (rows[i] || []).filter(c => str(c) !== '');
-        const unique = new Set(nonEmpty.map(c => str(c)));
-        if (nonEmpty.length >= 4 && unique.size >= 3) { headerIdx = i; break; }
+    for (let i = 0; i < Math.min(rows.length, 25); i++) {
+        const nonEmpty = (rows[i] || []).filter(c => str(c) !== '').map(c => str(c));
+        const unique = new Set(nonEmpty);
+        if (nonEmpty.length >= 4 && unique.size >= 3) {
+            const numPct = nonEmpty.filter(v => /^[\d.,%]+$/.test(v)).length / nonEmpty.length;
+            if (numPct < 0.6) { headerIdx = i; break; }
+        }
         if (nonEmpty.length >= 3 && unique.size >= 2 && headerIdx === 0) headerIdx = i;
     }
 
@@ -90,6 +174,7 @@ function parseXLSXInBrowser(workbook, sheetName) {
     while (headers.length < maxCols) headers.push(null);
     rows.forEach(r => { while (r.length < maxCols) r.push(null); });
 
+    // Skip sub-header rows
     let skip = 0;
     const subheaderRows = [];
     for (let i = headerIdx + 1; i < Math.min(headerIdx + 5, rows.length); i++) {
@@ -103,31 +188,49 @@ function parseXLSXInBrowser(workbook, sheetName) {
 
     const dataRows = rows.slice(headerIdx + 1 + skip);
 
+    // Classify columns
     const classifications = {};
-    let nameFound = false;
+    let nameFound = false, descFound = false;
+    // First pass: keyword-based skips
     for (let ci = 0; ci < maxCols; ci++) {
+        const hl = str(headers[ci]).toLowerCase();
+        if (!hl) continue;
+        if (DELTA_KW.some(k => hl.includes(k))) { classifications[ci] = 'delta'; continue; }
+        if (STATUS_KW.some(k => hl.includes(k))) { classifications[ci] = 'status'; continue; }
+        if (PRIORITY_KW.some(k => hl.includes(k))) { classifications[ci] = 'priority'; continue; }
+        if (ID_EXACT.has(hl)) { classifications[ci] = 'id'; continue; }
+    }
+    // Second pass: data-pattern detection
+    for (let ci = 0; ci < maxCols; ci++) {
+        if (classifications[ci]) continue;
         const hl = str(headers[ci]).toLowerCase();
         const values = dataRows.map(r => str(r[ci])).filter(v => v !== '');
         const total = values.length;
         if (total === 0) { classifications[ci] = 'empty'; continue; }
-        if (['delta', 'uplift', 'gap', '\u0394', 'diff'].some(k => hl.includes(k))) { classifications[ci] = 'delta'; continue; }
-        if (hl === 'status' || hl === 'state') { classifications[ci] = 'status'; continue; }
-        const raciPct = values.filter(v => RACI_VALUES.has(v.toUpperCase())).length / total;
-        const matPct = values.filter(v => isMat(v)).length / total;
+
+        const raciPct = values.filter(v => normalizeRaci(v) !== '').length / total;
+        const matPct = values.filter(v => isMat(v, 100)).length / total;
         const uniqueRatio = new Set(values.map(v => v.toLowerCase())).size / total;
         const avgLen = values.reduce((s, v) => s + v.length, 0) / total;
-        if (raciPct > 0.4) { classifications[ci] = 'raci'; }
-        else if (matPct > 0.4) {
+        const numPct = values.filter(v => /^[\d]+\.?[\d]*$/.test(v)).length / total;
+
+        if (raciPct > 0.3) {
+            const letterPct = values.filter(v => v.trim().length <= 3).length / total;
+            if (letterPct > 0.3) { classifications[ci] = 'raci'; continue; }
+        }
+        if (matPct > 0.4 && numPct > 0.4) {
             const isTarget = TARGET_KW.some(k => hl.includes(k));
             const hasPriorMat = Object.values(classifications).includes('maturity_now');
             classifications[ci] = (isTarget || hasPriorMat) ? 'maturity_target' : 'maturity_now';
-        } else if (['desc', 'description', 'details', 'notes'].some(k => hl.includes(k))) { classifications[ci] = 'description'; }
-        else if (['category', 'domain', 'area', 'group', 'pillar', 'section'].some(k => hl.includes(k))) { classifications[ci] = 'category'; }
-        else if (['capability', 'name', 'activity', 'task', 'function', 'process', 'item'].some(k => hl.includes(k))) { classifications[ci] = 'name'; nameFound = true; }
-        else if (!nameFound && avgLen > 3 && uniqueRatio > 0.5) {
+        } else if (DESC_KW.some(k => hl.includes(k))) { classifications[ci] = 'description'; descFound = true; }
+        else if (CAT_KW.some(k => hl.includes(k))) { classifications[ci] = 'category'; }
+        else if (NAME_KW.some(k => hl.includes(k))) { classifications[ci] = 'name'; nameFound = true; }
+        else if (!nameFound && avgLen > 3 && uniqueRatio > 0.5 && numPct < 0.5) {
             if (uniqueRatio < 0.3 && total > 5) classifications[ci] = 'category';
             else { classifications[ci] = 'name'; nameFound = true; }
-        } else if (uniqueRatio < 0.3 && total > 3) { classifications[ci] = 'category'; }
+        } else if (!descFound && avgLen > 30 && uniqueRatio > 0.7) { classifications[ci] = 'description'; descFound = true; }
+        else if (uniqueRatio < 0.3 && total > 3) { classifications[ci] = 'category'; }
+        else if (numPct > 0.8) { classifications[ci] = 'numeric_skip'; }
         else { classifications[ci] = 'unknown'; }
     }
     if (!Object.values(classifications).includes('name')) {
@@ -136,11 +239,13 @@ function parseXLSXInBrowser(workbook, sheetName) {
     }
 
     const raciCols = Object.entries(classifications).filter(([, t]) => t === 'raci').map(([ci]) => Number(ci)).sort((a, b) => a - b);
-    if (!raciCols.length) throw new Error('No RACI columns detected');
+    if (!raciCols.length) throw new Error('No RACI columns detected. Ensure columns have R/A/C/I values (also supports RASCI, DACI, full words, X/Y marks).');
 
     const makeId = label => label.replace(/[^a-zA-Z0-9\s]/g, '').trim().replace(/\s+/g, '_').toLowerCase();
     const makeShort = label => {
         if (label.length <= 5) return label.toUpperCase();
+        const words = label.match(/[A-Z][a-z]*|[a-z]+/g);
+        if (words && words.length >= 2) { const init = words.filter(w => /[a-zA-Z]/.test(w[0])).map(w => w[0]).join('').toUpperCase(); if (init.length >= 2 && init.length <= 5) return init; }
         const cons = label.replace(/[aeiou\s\W]/gi, '');
         return cons.length >= 3 ? cons.slice(0, 4).toUpperCase() : label.slice(0, 4).toUpperCase();
     };
@@ -148,10 +253,7 @@ function parseXLSXInBrowser(workbook, sheetName) {
     // Build sub-header lookup
     const subLabels = {};
     for (const sub of subheaderRows) {
-        for (const ci of raciCols) {
-            const v = str(sub[ci]);
-            if (v && v.length > 1) subLabels[ci] = v;
-        }
+        for (const ci of raciCols) { const v = str(sub[ci]); if (v && v.length > 1) subLabels[ci] = v; }
     }
 
     const roles = raciCols.map((ci, i) => {
@@ -172,28 +274,41 @@ function parseXLSXInBrowser(workbook, sheetName) {
     const matNowCol = Object.keys(classifications).find(k => classifications[k] === 'maturity_now');
     const matTgtCol = Object.keys(classifications).find(k => classifications[k] === 'maturity_target');
 
+    // Detect maturity scale
+    let matScale = 5;
+    if (matNowCol != null) {
+        const matVals = dataRows.map(r => str(r[Number(matNowCol)])).filter(v => v);
+        if (matTgtCol != null) matVals.push(...dataRows.map(r => str(r[Number(matTgtCol)])).filter(v => v));
+        matScale = detectScale(matVals);
+    }
+
     const catsDict = {};
     let currentCat = 'General';
     for (const row of dataRows) {
         const nonEmpty = row.filter(c => str(c) !== '');
         if (!nonEmpty.length) continue;
         const nameVal = str(row[nameCol]);
-        const allRaciEmpty = raciCols.every(ci => strUp(row[ci]) === '');
-        if (nameVal && allRaciEmpty && catCol == null) { currentCat = nameVal; continue; }
+        // Inline category detection (before summary skip)
+        const allRaciEmpty = raciCols.every(ci => str(row[ci]) === '');
+        if (nameVal && allRaciEmpty && catCol == null) { currentCat = stripCatNum(nameVal); continue; }
+        // Summary row skip
+        if (nameVal && isSummaryRow(nameVal)) continue;
         if (!nameVal) continue;
-        if (catCol != null) { const cv = str(row[Number(catCol)]); if (cv) currentCat = cv; }
+        if (catCol != null) { const cv = str(row[Number(catCol)]); if (cv) currentCat = stripCatNum(cv); }
         const item = { name: nameVal };
-        if (descCol != null) item.desc = str(row[Number(descCol)]);
-        for (const role of roles) { const v = strUp(row[role._ci]); if (RACI_VALUES.has(v)) item[role.id] = v; }
-        if (matNowCol != null) { const n = Number(str(row[Number(matNowCol)])); if (!isNaN(n)) item.now = Math.round(n); }
-        if (matTgtCol != null) { const n = Number(str(row[Number(matTgtCol)])); if (!isNaN(n)) item.tgt = Math.round(n); }
+        if (descCol != null) { const d = str(row[Number(descCol)]); if (d) item.desc = d; }
+        // Extended RACI normalization
+        for (const role of roles) { const v = normalizeRaci(row[role._ci]); if (v) item[role.id] = v; }
+        // Maturity normalization
+        if (matNowCol != null) { const n = normalizeMat(row[Number(matNowCol)], matScale); if (n != null) item.now = n; }
+        if (matTgtCol != null) { const n = normalizeMat(row[Number(matTgtCol)], matScale); if (n != null) item.tgt = n; }
         if (!catsDict[currentCat]) catsDict[currentCat] = [];
         catsDict[currentCat].push(item);
     }
 
     const roleIds = roles.map(r => r.id);
     const categories = Object.entries(catsDict)
-        .filter(([, items]) => items.length > 0 && items.some(item => roleIds.some(rid => ['R','A','C','I'].includes(item[rid]))))
+        .filter(([name, items]) => items.length > 0 && !isSummaryCat(name) && items.some(item => roleIds.some(rid => RACI_SET.has(item[rid]))))
         .map(([name, items], i) => ({ name, color: CAT_PALETTE[i % CAT_PALETTE.length], items }));
 
     const rolesClean = roles.map(({ _ci, ...r }) => r);
@@ -204,7 +319,7 @@ function parseXLSXInBrowser(workbook, sheetName) {
     }));
     const zeroR = rolesClean.filter(r => !categories.some(c => c.items.some(item => item[r.id] === 'R'))).map(r => r.label);
     const colReport = {};
-    Object.entries(classifications).filter(([, t]) => !['empty', 'delta'].includes(t))
+    Object.entries(classifications).filter(([, t]) => !['empty','delta','priority','id','numeric_skip','unknown'].includes(t))
         .forEach(([ci, t]) => { colReport[ci] = { header: str(headers[ci]), classification: t }; });
 
     return {
@@ -214,7 +329,7 @@ function parseXLSXInBrowser(workbook, sheetName) {
             role_count: rolesClean.length, category_count: categories.length,
             capability_count: totalCap, orphaned_capabilities: orphaned,
             zero_r_roles: zeroR, has_maturity: matNowCol != null,
-            column_classifications: colReport,
+            maturity_scale: matScale, column_classifications: colReport, layout: 'standard',
         },
     };
 }
@@ -960,6 +1075,9 @@ function App() {
     }, [handleFile]);
     const handleFileInput = useCallback((e) => { const file = e.target.files[0]; if (file) handleFile(file); }, [handleFile]);
 
+    const [exportOpen, setExportOpen] = useState(false);
+    const [exporting, setExporting] = useState(null);
+
     const exportJSON = useCallback(() => {
         if (!data) return;
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -967,6 +1085,43 @@ function App() {
         a.href = URL.createObjectURL(blob);
         a.download = `raci-${data.meta.filename.replace(/\.[^.]+$/, '')}.json`;
         a.click();
+        setExportOpen(false);
+    }, [data]);
+
+    const exportHTML = useCallback(() => {
+        if (!data) return;
+        setExporting('html');
+        fetch('/api/export/html', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }).then(r => {
+            if (!r.ok) throw new Error('Export failed');
+            return r.blob();
+        }).then(blob => {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'raci-dashboard.html';
+            a.click();
+        }).catch(err => setError(`HTML export failed: ${err.message}`))
+        .finally(() => { setExporting(null); setExportOpen(false); });
+    }, [data]);
+
+    const exportPowerBI = useCallback(() => {
+        if (!data) return;
+        setExporting('powerbi');
+        fetch('/api/export/powerbi', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        }).then(r => {
+            if (!r.ok) throw new Error('Export failed');
+            return r.blob();
+        }).then(blob => {
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'raci-powerbi-kit.zip';
+            a.click();
+        }).catch(err => setError(`Power BI export failed: ${err.message}`))
+        .finally(() => { setExporting(null); setExportOpen(false); });
     }, [data]);
 
     if (loading) return <div className="loading"><div className="loading-spinner"></div>Loading...</div>;
@@ -1008,7 +1163,18 @@ function App() {
                                 </div>
                                 <button className={`detection-toggle ${showDetection ? 'active' : ''}`}
                                     onClick={() => setShowDetection(!showDetection)}>Detection</button>
-                                <button className="export-btn" onClick={exportJSON}>Export JSON</button>
+                                <div className="export-dropdown" onMouseLeave={() => setExportOpen(false)}>
+                                    <button className="export-btn" onClick={() => setExportOpen(!exportOpen)}>
+                                        {exporting ? 'Exporting...' : 'Export \u25BE'}
+                                    </button>
+                                    {exportOpen && (
+                                        <div className="export-menu">
+                                            <button className="export-menu-item" onClick={exportJSON}>JSON Data</button>
+                                            <button className="export-menu-item" onClick={exportHTML}>HTML Dashboard</button>
+                                            <button className="export-menu-item" onClick={exportPowerBI}>Power BI Kit (.zip)</button>
+                                        </div>
+                                    )}
+                                </div>
                                 <div className="tab-bar">
                                     {VIEWS.map(v => (
                                         <button key={v.id} className={`tab-btn ${view === v.id ? 'active' : ''}`}
