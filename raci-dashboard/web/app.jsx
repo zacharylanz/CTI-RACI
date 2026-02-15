@@ -427,11 +427,43 @@ function RaciLegend() {
 // ═══════════════════════════════════════════
 // View 1: Responsibility Heatmap
 // ═══════════════════════════════════════════
-function HeatmapView({ data, computed, search }) {
+function MaturityPicker({ value, field, onPick, onClose }) {
+    return (
+        <div className="maturity-picker" onClick={e => e.stopPropagation()}>
+            <div className="maturity-picker-label">{field === 'now' ? 'Current' : 'Target'}</div>
+            <div className="maturity-picker-grid">
+                {[0, 1, 2, 3, 4, 5].map(n => (
+                    <button key={n} className={`maturity-picker-btn ${n === value ? 'active' : ''}`}
+                        style={{ backgroundColor: n === value ? MATURITY_COLORS[n] : 'transparent', color: n === value ? '#000' : MATURITY_COLORS[n], borderColor: MATURITY_COLORS[n] }}
+                        onClick={() => { onPick(n); onClose(); }}>
+                        {n}
+                    </button>
+                ))}
+            </div>
+            <div className="maturity-picker-labels">
+                <span>{MATURITY_LABELS[0]}</span>
+                <span>{MATURITY_LABELS[5]}</span>
+            </div>
+        </div>
+    );
+}
+
+function HeatmapView({ data, computed, search, editMode, onCellUpdate, onMaturityUpdate }) {
     const { roles, categories } = data;
     const { show, hide } = useContext(TooltipCtx);
     const [hoveredCol, setHoveredCol] = useState(null);
     const [hoveredCat, setHoveredCat] = useState(null);
+    const [matPicker, setMatPicker] = useState(null);
+
+    // Close maturity picker on outside click or Escape
+    useEffect(() => {
+        if (!matPicker) return;
+        const onKey = (e) => { if (e.key === 'Escape') setMatPicker(null); };
+        const onClick = () => setMatPicker(null);
+        window.addEventListener('keydown', onKey);
+        window.addEventListener('click', onClick);
+        return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('click', onClick); };
+    }, [!!matPicker]);
 
     const filteredCategories = useMemo(() => {
         if (!search) return categories;
@@ -481,7 +513,7 @@ function HeatmapView({ data, computed, search }) {
                                 {r.status === 'unfilled' && <span className="heatmap-unfilled-dot"></span>}
                             </th>
                         ))}
-                        {data.meta.has_maturity && <th style={{ color: 'var(--text-dim)', fontSize: 10, minWidth: 80 }}>MATURITY</th>}
+                        {(data.meta.has_maturity || editMode) && <th style={{ color: 'var(--text-dim)', fontSize: 10, minWidth: 80 }}>MATURITY</th>}
                     </tr>
                 </thead>
                 <tbody>
@@ -491,7 +523,7 @@ function HeatmapView({ data, computed, search }) {
                         <React.Fragment key={cat.name}>
                             <tr>
                                 <td className="heatmap-cat-header"
-                                    colSpan={roles.length + 1 + (data.meta.has_maturity ? 1 : 0)}
+                                    colSpan={roles.length + 1 + ((data.meta.has_maturity || editMode) ? 1 : 0)}
                                     onMouseEnter={() => setHoveredCat(cat.name)}
                                     onMouseLeave={() => setHoveredCat(null)}>
                                     <span className="heatmap-cat-dot" style={{ backgroundColor: cat.color }}></span>
@@ -508,26 +540,46 @@ function HeatmapView({ data, computed, search }) {
                                         {roles.map(r => {
                                             const val = item[r.id];
                                             const isColDimmed = hoveredCol && hoveredCol !== r.id;
+                                            const handleCellClick = editMode ? () => {
+                                                const cycle = ['', 'R', 'A', 'C', 'I'];
+                                                const idx = cycle.indexOf(val || '');
+                                                const next = cycle[(idx + 1) % cycle.length];
+                                                onCellUpdate(cat.name, item.name, r.id, next);
+                                            } : undefined;
                                             return (
                                                 <td key={r.id}
-                                                    className={`heatmap-cell ${isColDimmed && !hoveredCat ? 'dimmed' : ''} ${val ? 'raci-' + val.toLowerCase() : 'raci-empty'}`}
-                                                    onMouseEnter={() => showItemTip(item, r)}
-                                                    onMouseLeave={hide}>
-                                                    {val || ''}
+                                                    className={`heatmap-cell ${isColDimmed && !hoveredCat ? 'dimmed' : ''} ${val ? 'raci-' + val.toLowerCase() : 'raci-empty'} ${editMode ? 'editable' : ''}`}
+                                                    onMouseEnter={editMode ? undefined : () => showItemTip(item, r)}
+                                                    onMouseLeave={editMode ? undefined : hide}
+                                                    onClick={handleCellClick}>
+                                                    {val || (editMode ? '+' : '')}
                                                 </td>
                                             );
                                         })}
-                                        {data.meta.has_maturity && (
-                                            <td className="heatmap-maturity-cell">
-                                                {item.now != null && (
-                                                    <div className="mini-maturity">
-                                                        <div className="mini-mat-track">
-                                                            <div className="mini-mat-fill" style={{ width: `${(item.now / 5) * 100}%`, backgroundColor: MATURITY_COLORS[item.now] }}></div>
-                                                            {item.tgt != null && <div className="mini-mat-target" style={{ left: `${(item.tgt / 5) * 100}%` }}></div>}
-                                                        </div>
-                                                        <span className="mini-mat-label" style={{ color: MATURITY_COLORS[item.now] }}>{item.now}</span>
-                                                        {item.tgt != null && <span className="mini-mat-arrow">&#8594;</span>}
-                                                        {item.tgt != null && <span className="mini-mat-label" style={{ color: MATURITY_COLORS[item.tgt] }}>{item.tgt}</span>}
+                                        {(data.meta.has_maturity || editMode) && (
+                                            <td className={`heatmap-maturity-cell ${editMode ? 'editable' : ''}`}>
+                                                <div className="mini-maturity">
+                                                    <div className="mini-mat-track">
+                                                        {item.now != null && <div className="mini-mat-fill" style={{ width: `${(item.now / 5) * 100}%`, backgroundColor: MATURITY_COLORS[item.now] }}></div>}
+                                                        {item.tgt != null && <div className="mini-mat-target" style={{ left: `${(item.tgt / 5) * 100}%` }}></div>}
+                                                    </div>
+                                                    <span className={`mini-mat-label ${editMode ? 'editable' : ''}`}
+                                                        style={{ color: MATURITY_COLORS[item.now ?? 0] }}
+                                                        onClick={editMode ? (e) => { e.stopPropagation(); setMatPicker({ cat: cat.name, item: item.name, field: 'now', value: item.now ?? 0, x: e.clientX, y: e.clientY }); } : undefined}>
+                                                        {item.now ?? (editMode ? '-' : '')}
+                                                    </span>
+                                                    <span className="mini-mat-arrow">{item.now != null || editMode ? '\u2192' : ''}</span>
+                                                    <span className={`mini-mat-label ${editMode ? 'editable' : ''}`}
+                                                        style={{ color: MATURITY_COLORS[item.tgt ?? 0] }}
+                                                        onClick={editMode ? (e) => { e.stopPropagation(); setMatPicker({ cat: cat.name, item: item.name, field: 'tgt', value: item.tgt ?? 0, x: e.clientX, y: e.clientY }); } : undefined}>
+                                                        {item.tgt ?? (editMode ? '-' : '')}
+                                                    </span>
+                                                </div>
+                                                {matPicker && matPicker.cat === cat.name && matPicker.item === item.name && (
+                                                    <div className="maturity-picker-anchor" style={{ position: 'relative' }}>
+                                                        <MaturityPicker value={matPicker.value} field={matPicker.field}
+                                                            onPick={(v) => onMaturityUpdate(matPicker.cat, matPicker.item, matPicker.field, v)}
+                                                            onClose={() => setMatPicker(null)} />
                                                     </div>
                                                 )}
                                             </td>
@@ -555,7 +607,7 @@ function HeatmapView({ data, computed, search }) {
                                 </td>
                             );
                         })}
-                        {data.meta.has_maturity && <td></td>}
+                        {(data.meta.has_maturity || editMode) && <td></td>}
                     </tr>
                 </tbody>
             </table>
@@ -1029,6 +1081,7 @@ function App() {
             const num = parseInt(e.key);
             if (num >= 1 && num <= 4) { setView(VIEWS[num - 1].id); e.preventDefault(); }
             if (e.key === '/' && !e.ctrlKey) { document.querySelector('.search-input')?.focus(); e.preventDefault(); }
+            if (e.key === 'e' && !e.ctrlKey && !e.metaKey) { setEditMode(prev => !prev); e.preventDefault(); }
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
@@ -1074,6 +1127,50 @@ function App() {
         if (file) handleFile(file);
     }, [handleFile]);
     const handleFileInput = useCallback((e) => { const file = e.target.files[0]; if (file) handleFile(file); }, [handleFile]);
+
+    const [editMode, setEditMode] = useState(false);
+
+    const updateRaciCell = useCallback((category, capability, roleId, value) => {
+        setData(prev => {
+            const next = JSON.parse(JSON.stringify(prev));
+            for (const cat of next.categories) {
+                if (cat.name !== category) continue;
+                for (const item of cat.items) {
+                    if (item.name !== capability) continue;
+                    if (value) item[roleId] = value;
+                    else delete item[roleId];
+                }
+            }
+            return next;
+        });
+        if (!window.__RACI_DATA__) {
+            fetch('/api/raci/cell', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category, capability, role_id: roleId, value }),
+            }).catch(() => {});
+        }
+    }, []);
+
+    const updateMaturity = useCallback((category, capability, field, value) => {
+        setData(prev => {
+            const next = JSON.parse(JSON.stringify(prev));
+            for (const cat of next.categories) {
+                if (cat.name !== category) continue;
+                for (const item of cat.items) {
+                    if (item.name !== capability) continue;
+                    item[field] = value;
+                }
+            }
+            if (!next.meta.has_maturity) next.meta.has_maturity = true;
+            return next;
+        });
+        if (!window.__RACI_DATA__) {
+            fetch('/api/raci/maturity', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category, capability, field, value }),
+            }).catch(() => {});
+        }
+    }, []);
 
     const [exportOpen, setExportOpen] = useState(false);
     const [exporting, setExporting] = useState(null);
@@ -1161,6 +1258,10 @@ function App() {
                                         value={search} onChange={e => setSearch(e.target.value)} />
                                     {search && <button className="search-clear" onClick={() => setSearch('')}>&#x2715;</button>}
                                 </div>
+                                <button className={`edit-toggle ${editMode ? 'active' : ''}`}
+                                    onClick={() => setEditMode(!editMode)}>
+                                    {editMode ? 'Done' : 'Edit'}<span className="tab-key">e</span>
+                                </button>
                                 <button className={`detection-toggle ${showDetection ? 'active' : ''}`}
                                     onClick={() => setShowDetection(!showDetection)}>Detection</button>
                                 <div className="export-dropdown" onMouseLeave={() => setExportOpen(false)}>
@@ -1214,7 +1315,7 @@ function App() {
                     ) : (
                         <>
                             {showDetection && <DetectionPanel meta={data.meta} />}
-                            {view === 'Heatmap' && <HeatmapView data={data} computed={computed} search={search} />}
+                            {view === 'Heatmap' && <HeatmapView data={data} computed={computed} search={search} editMode={editMode} onCellUpdate={updateRaciCell} onMaturityUpdate={updateMaturity} />}
                             {view === 'Sunburst' && <SunburstView data={data} computed={computed} />}
                             {view === 'Workload' && <WorkloadView data={data} computed={computed} />}
                             {view === 'Connections' && <ConnectionView data={data} computed={computed} />}

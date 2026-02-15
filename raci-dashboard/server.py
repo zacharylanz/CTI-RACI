@@ -128,6 +128,48 @@ def create_app(initial_data=None):
                 download_name='raci-powerbi-kit.zip'
             )
 
+    @app.route('/api/raci/cell', methods=['PUT'])
+    def update_raci_cell():
+        """Update a single RACI cell assignment."""
+        body = request.get_json()
+        if not body or not app.raci_data:
+            return Response(json.dumps({'error': 'No data'}), status=400, mimetype='application/json')
+        cat_name = body.get('category')
+        cap_name = body.get('capability')
+        role_id = body.get('role_id')
+        value = body.get('value', '')
+        for cat in app.raci_data['categories']:
+            if cat['name'] == cat_name:
+                for item in cat['items']:
+                    if item['name'] == cap_name:
+                        if value and value in ('R', 'A', 'C', 'I'):
+                            item[role_id] = value
+                        elif role_id in item:
+                            del item[role_id]
+                        return Response(json.dumps({'ok': True}), mimetype='application/json')
+        return Response(json.dumps({'error': 'Not found'}), status=404, mimetype='application/json')
+
+    @app.route('/api/raci/maturity', methods=['PUT'])
+    def update_raci_maturity():
+        """Update a maturity score (now or tgt) for a capability."""
+        body = request.get_json()
+        if not body or not app.raci_data:
+            return Response(json.dumps({'error': 'No data'}), status=400, mimetype='application/json')
+        cat_name = body.get('category')
+        cap_name = body.get('capability')
+        field = body.get('field')
+        value = body.get('value')
+        if field not in ('now', 'tgt') or not isinstance(value, int) or value < 0 or value > 5:
+            return Response(json.dumps({'error': 'Invalid field or value'}), status=400, mimetype='application/json')
+        for cat in app.raci_data['categories']:
+            if cat['name'] == cat_name:
+                for item in cat['items']:
+                    if item['name'] == cap_name:
+                        item[field] = value
+                        app.raci_data['meta']['has_maturity'] = True
+                        return Response(json.dumps({'ok': True}), mimetype='application/json')
+        return Response(json.dumps({'error': 'Not found'}), status=404, mimetype='application/json')
+
     return app
 
 
